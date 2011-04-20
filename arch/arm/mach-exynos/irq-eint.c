@@ -17,6 +17,8 @@
 #include <linux/sysdev.h>
 #include <linux/gpio.h>
 
+#include <asm/mach/irq.h>
+
 #include <plat/pm.h>
 #include <plat/cpu.h>
 #include <plat/gpio-cfg.h>
@@ -187,6 +189,7 @@ static inline void exynos4_irq_demux_eint(unsigned int start)
 static void exynos4_irq_demux_eint16_31(unsigned int irq, struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_get_chip(irq);
+
 	chained_irq_enter(chip, desc);
 	exynos4_irq_demux_eint(IRQ_EINT(16));
 	exynos4_irq_demux_eint(IRQ_EINT(24));
@@ -199,14 +202,7 @@ static void exynos4_irq_eint0_15(unsigned int irq, struct irq_desc *desc)
 	struct irq_chip *chip = irq_get_chip(irq);
 
 	chained_irq_enter(chip, desc);
-	chip->irq_mask(&desc->irq_data);
-
-	if (chip->irq_ack)
-		chip->irq_ack(&desc->irq_data);
-
 	generic_handle_irq(*irq_data);
-
-	chip->irq_unmask(&desc->irq_data);
 	chained_irq_exit(chip, desc);
 }
 
