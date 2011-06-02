@@ -71,6 +71,7 @@ static int s5pv210_serial_getsource(struct uart_port *port,
 	return 0;
 }
 
+extern int console_suspend_enabled;
 static int s5pv210_serial_resetport(struct uart_port *port,
 					struct s3c2410_uartcfg *cfg)
 {
@@ -83,6 +84,11 @@ static int s5pv210_serial_resetport(struct uart_port *port,
 	/* reset both fifos */
 	wr_regl(port, S3C2410_UFCON, cfg->ufcon | S3C2410_UFCON_RESETBOTH);
 	wr_regl(port, S3C2410_UFCON, cfg->ufcon);
+
+	if (console_suspend_enabled) {
+		wr_regl(port, S3C64XX_UINTM, 0xf);
+		wr_regl(port, S3C64XX_UINTP, 0xf);
+	}
 
 	/* It is need to delay When reset FIFO register */
 	udelay(1);
