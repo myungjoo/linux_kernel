@@ -41,6 +41,7 @@ extern struct platform_device s3c64xx_device_spi0;
 extern struct platform_device s3c64xx_device_spi1;
 
 extern struct platform_device s3c_device_adc;
+extern struct platform_device s3c_device_adc_ntc_thermistor;
 extern struct platform_device s3c_device_cfcon;
 extern struct platform_device s3c_device_fb;
 extern struct platform_device s3c_device_hwmon;

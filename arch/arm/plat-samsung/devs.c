@@ -29,6 +29,8 @@
 #include <linux/mtd/partitions.h>
 #include <linux/mmc/host.h>
 #include <linux/ioport.h>
+#include <linux/hwmon.h>
+#include <linux/platform_data/ntc_thermistor.h>
 
 #include <asm/irq.h>
 #include <asm/pmu.h>
@@ -116,6 +118,94 @@ struct platform_device s3c_device_adc = {
 	.num_resources	= ARRAY_SIZE(s3c_adc_resource),
 	.resource	= s3c_adc_resource,
 };
+
+#if defined(CONFIG_SENSORS_NTC_THERMISTOR)
+/* NTC Thermistor. Attached to S3C-ADC in some Samsung SoC Devices */
+struct platform_device s3c_device_adc_ntc_thermistor;
+static int ntc_adc_num = -EINVAL; /* Uninitialized */
+static struct s3c_adc_client *ntc_adc;
+
+int __init s3c_adc_ntc_init(int port)
+{
+	int err = 0;
+
+	if (port < 0 || port > 9)
+		return -EINVAL;
+	ntc_adc_num = port;
+
+	ntc_adc = s3c_adc_register(&s3c_device_adc_ntc_thermistor, NULL, NULL,
+				   0);
+	if (IS_ERR(ntc_adc)) {
+		err = PTR_ERR(ntc_adc);
+		ntc_adc = NULL;
+		return err;
+	}
+
+	return 0;
+}
+
+static int read_thermistor_uV(void)
+{
+	int val;
+	s64 converted;
+
+	WARN(ntc_adc == NULL || ntc_adc_num < 0,
+	     "S3C NTC-ADC is not initialized for %s.\n", __func__);
+
+	val = s3c_adc_read(ntc_adc, ntc_adc_num);
+
+	converted = 3300000LL * (s64) val;
+	converted >>= 12;
+
+	return converted;
+}
+
+static struct ntc_thermistor_platform_data ntc_adc_pdata = {
+	.read_uV	= read_thermistor_uV,
+	.pullup_uV	= 3300000, /* voltage of vdd for ADC */
+	.pullup_ohm	= 100000,
+	.pulldown_ohm	= 100000,
+	.connect	= NTC_CONNECTED_GROUND,
+};
+
+struct platform_device s3c_device_adc_ntc_thermistor = {
+	.name			= "ncp15wb473",
+	.dev			= {
+		.platform_data = &ntc_adc_pdata,
+	},
+};
+
+/* A helper function to read values from NTC, in 1/1000 Centigrade */
+int read_s3c_adc_ntc(int *mC)
+{
+	int ret;
+	static struct device *hwmon;
+	static struct hwmon_property *entry;
+
+	if (hwmon == NULL)
+		hwmon = hwmon_find_device(&s3c_device_adc_ntc_thermistor.dev);
+
+	if (IS_ERR_OR_NULL(hwmon)) {
+		hwmon = NULL;
+		return -ENODEV;
+	}
+
+	if (entry == NULL)
+		entry = hwmon_get_property(hwmon, "temp1_input");
+	if (IS_ERR_OR_NULL(entry)) {
+		entry = NULL;
+		return -ENODEV;
+	}
+
+	ret = hwmon_get_value(hwmon, entry, mC);
+	if (ret < 0) {
+		entry = NULL;
+		return ret;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_SENSORS_NTC_THERMISTOR */
 #endif /* CONFIG_SAMSUNG_DEV_ADC */
 
 /* Camif Controller */
