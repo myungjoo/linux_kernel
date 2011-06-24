@@ -104,10 +104,12 @@ extern void s3c_pm_do_restore_core(struct sleep_save *ptr, int count);
 extern int s3c_irqext_wake(struct irq_data *data, unsigned int state);
 extern int s3c24xx_irq_suspend(void);
 extern void s3c24xx_irq_resume(void);
+extern int s3c_irq_wake(struct irq_data *data, unsigned int state);
 #else
 #define s3c_irqext_wake NULL
 #define s3c24xx_irq_suspend NULL
 #define s3c24xx_irq_resume  NULL
+#define s3c_irq_wake NULL
 #endif
 
 extern struct syscore_ops s3c24xx_irq_syscore_ops;
