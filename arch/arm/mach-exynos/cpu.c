@@ -10,6 +10,7 @@
 
 #include <linux/sched.h>
 #include <linux/sysdev.h>
+#include <linux/irq.h>
 
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
@@ -29,6 +30,7 @@
 #include <plat/iic-core.h>
 #include <plat/reset.h>
 #include <plat/tv-core.h>
+#include <plat/pm.h>
 
 #include <mach/regs-irq.h>
 #include <mach/regs-pmu.h>
@@ -241,6 +243,8 @@ void __init exynos4_init_irq(void)
 	 * uses GIC instead of VIC.
 	 */
 	s5p_init_irq(NULL, 0);
+
+	irq_get_chip(IRQ_RTC_ALARM)->irq_set_wake = s3c_irq_wake;
 }
 
 struct sysdev_class exynos4_sysclass = {
