@@ -169,6 +169,9 @@ static int exynos4_cpu_suspend(unsigned long arg)
 {
 	outer_flush_all();
 
+	/* EPLL and VPLL should be enabled when entering a suspend. */
+	__raw_writel(__raw_readl(S5P_EPLL_CON0) | (1 << 31), S5P_EPLL_CON0);
+	__raw_writel(__raw_readl(S5P_VPLL_CON0) | (1 << 31), S5P_VPLL_CON0);
 	/* issue the standby signal into the pm unit. */
 	cpu_do_idle();
 
@@ -184,6 +187,10 @@ static void exynos4_pm_prepare(void)
 	s3c_pm_do_save(exynos4_l2cc_save, ARRAY_SIZE(exynos4_l2cc_save));
 	s3c_pm_do_save(exynos4_epll_save, ARRAY_SIZE(exynos4_epll_save));
 	s3c_pm_do_save(exynos4_vpll_save, ARRAY_SIZE(exynos4_vpll_save));
+
+	/* EVT1 issues with undocumented S5P_WAKEUP_MASK bits. */
+	tmp = __raw_readl(S5P_WAKEUP_MASK);
+	__raw_writel(0x000fffff & tmp, S5P_WAKEUP_MASK);
 
 	tmp = __raw_readl(S5P_INFORM1);
 
