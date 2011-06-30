@@ -36,6 +36,7 @@ obj-$(CONFIG_MACH_ORIGEN)		+= mach-origen.o
 
 obj-$(CONFIG_MACH_SMDK4212)		+= mach-smdk4x12.o
 obj-$(CONFIG_MACH_SMDK4412)		+= mach-smdk4x12.o
+obj-$(CONFIG_MACH_NURI)			+= mach-nuri.o setup-charger.o
 
 # device support
 

@@ -14,10 +14,12 @@
 #include <linux/i2c.h>
 #include <linux/i2c/atmel_mxt_ts.h>
 #include <linux/i2c-gpio.h>
+#include <linux/irq.h>
 #include <linux/gpio_keys.h>
 #include <linux/gpio.h>
 #include <linux/power/max8903_charger.h>
 #include <linux/power/max17042_battery.h>
+#include <linux/power/charger-manager.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/fixed.h>
 #include <linux/mfd/max8997.h>
@@ -52,8 +54,11 @@
 #include <plat/camport.h>
 #include <plat/mipi_csis.h>
 #include <plat/adc-ntc.h>
+#include <plat/pm.h>
 
 #include <mach/map.h>
+
+#include "setup-charger.h"
 
 /* Following are default values for UCON, ULCON and UFCON UART registers */
 #define NURI_UCON_DEFAULT	(S3C2410_UCON_TXILEVEL |	\
@@ -1075,11 +1080,19 @@ static struct platform_device nuri_max8903_device = {
 	},
 };
 
+static struct device *nuri_cm_devices[] = {
+	&s3c_device_i2c5.dev,
+	&s3c_device_adc.dev,
+	NULL, /* Reserved for UART */
+	NULL,
+};
+
 static void __init nuri_power_init(void)
 {
 	int gpio;
 	int irq_base = IRQ_GPIO_END + 1;
 	int ta_en = 0;
+	int i = 0;
 
 	nuri_max8997_pdata.irq_base = irq_base;
 	irq_base += MAX8997_IRQ_NR;
@@ -1093,6 +1106,18 @@ static void __init nuri_power_init(void)
 	gpio_request(gpio, "FUEL_ALERT");
 	s3c_gpio_cfgpin(gpio, S3C_GPIO_SFN(0xf));
 	s3c_gpio_setpull(gpio, S3C_GPIO_PULL_NONE);
+
+	nuri_chg_irqs_set_base(nuri_max8997_pdata.irq_base, 0);
+
+#ifdef CONFIG_DEBUG_S3C_UART
+	while (nuri_cm_devices[i])
+		i++;
+	nuri_cm_devices[i] = &s3c24xx_uart_src[CONFIG_DEBUG_S3C_UART]->dev;
+	s3c_cm_resume_console = true;
+#else
+	s3c_cm_resume_console = false;
+#endif
+	s3c_cm_devices = nuri_cm_devices;
 
 	gpio = nuri_max8903.dok;
 	gpio_request(gpio, "TA_nCONNECTED");
@@ -1281,6 +1306,7 @@ static struct platform_device *nuri_devices[] __initdata = {
 	&nuri_max8903_device,
 	&cam_vdda_fixed_rdev,
 	&cam_8m_12v_fixed_rdev,
+	&nuri_charger_manager,
 };
 
 static void __init nuri_map_io(void)
@@ -1319,6 +1345,7 @@ static void __init nuri_machine_init(void)
 	clk_xusbxti.rate = 24000000;
 
 	s3c_adc_ntc_init(6); /* NTC Thermistor uses ADC port 6 */
+	setup_charger_manager(&nuri_charger_g_desc);
 
 	/* Last */
 	platform_add_devices(nuri_devices, ARRAY_SIZE(nuri_devices));
