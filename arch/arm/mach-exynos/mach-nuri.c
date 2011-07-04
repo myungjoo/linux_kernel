@@ -398,7 +398,7 @@ static void __init nuri_tsp_init(void)
 }
 
 static struct regulator_consumer_supply __initdata max8997_ldo1_[] = {
-	REGULATOR_SUPPLY("vdd", "s5p-adc"), /* Used by CPU's ADC drv */
+	REGULATOR_SUPPLY("vdd", "samsung-adc-v3"), /* Used by CPU's ADC drv */
 };
 static struct regulator_consumer_supply __initdata max8997_ldo3_[] = {
 	REGULATOR_SUPPLY("vdd11", "s5p-mipi-csis.0"), /* MIPI */
