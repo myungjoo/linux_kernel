@@ -227,6 +227,8 @@ static int s3c_hwmon_create_attr(struct device *dev,
 {
 	struct sensor_device_attribute *attr;
 	int ret;
+	struct platform_device = to_platform_device(dev);
+	struct s3c_hwmon *hwmon = platform_get_drvdata(pdev, hwmon);
 
 	snprintf(attrs->in_name, sizeof(attrs->in_name), "in%d_input", channel);
 
@@ -242,6 +244,7 @@ static int s3c_hwmon_create_attr(struct device *dev,
 		dev_err(dev, "failed to create input attribute\n");
 		return ret;
 	}
+	hwmon_register_property(hwmon->hwmon_dev, &attr->dev_attr);
 
 	/* if this has a name, add a label */
 	if (cfg->name) {
@@ -260,6 +263,7 @@ static int s3c_hwmon_create_attr(struct device *dev,
 			device_remove_file(dev, &attrs->in.dev_attr);
 			dev_err(dev, "failed to create label attribute\n");
 		}
+		hwmon_register_property(hwmon->hwmon_dev, &attr->dev_attr);
 	}
 
 	return ret;
@@ -268,6 +272,12 @@ static int s3c_hwmon_create_attr(struct device *dev,
 static void s3c_hwmon_remove_attr(struct device *dev,
 				  struct s3c_hwmon_attr *attrs)
 {
+	/*
+	 * hwmon_unregister_property is not needed for this as
+	 * hwmon_device_unregister() is always called in the paths
+	 * when s3c_hwmon_revoce_attr() is called. And hwmon_device_unregister
+	 * calls hwmon_unregister_property for all properties.
+	 */
 	device_remove_file(dev, &attrs->in.dev_attr);
 	device_remove_file(dev, &attrs->label.dev_attr);
 }

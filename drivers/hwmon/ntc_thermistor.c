@@ -389,6 +389,8 @@ static int __devinit ntc_thermistor_probe(struct platform_device *pdev)
 		goto err_after_sysfs;
 	}
 
+	hwmon_register_properties(data->hwmon_dev, &ntc_attr_group);
+
 	dev_info(&pdev->dev, "Thermistor %s:%d (type: %s/%lu) successfully probed.\n",
 			pdev->name, pdev->id, pdev->id_entry->name,
 			pdev->id_entry->driver_data);
