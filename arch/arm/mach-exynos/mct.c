@@ -148,7 +148,7 @@ static void exynos4_frc_resume(struct clocksource *cs)
 {
 	exynos4_mct_frc_start((u32)(time_suspended >> 32), (u32)time_suspended);
 
-	exynos4_mct_write(0x1, EXYNOS4_MCT_L0_BASE + MCT_L_TCNTB_OFFSET);
+	exynos4_mct_write(0x1, EXYNOS4_MCT_L_BASE(0) + MCT_L_TCNTB_OFFSET);
 };
 
 struct clocksource mct_frc = {
