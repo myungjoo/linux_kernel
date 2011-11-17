@@ -116,7 +116,6 @@ static struct charger_desc nuri_charger_desc = {
 	.irqs			= nuri_chg_irqs,
 
 	.temperature_out_of_range	= ntc_thermistor_ck,
-	.measure_ambient_temp	= true,
 	.measure_battery_temp	= false,
 };
 
