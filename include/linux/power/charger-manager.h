@@ -189,16 +189,38 @@ struct charger_manager {
 };
 
 #ifdef CONFIG_CHARGER_MANAGER
+extern void cm_notify_event(struct charger_manager *cm, enum cm_irq_types type,
+			    char *msg); /* msg: optional */
+extern struct charger_manager *get_charger_manager(char *psy_name);
 extern int setup_charger_manager(struct charger_global_desc *gd);
+extern bool is_charger_manager_active(void);
 extern bool cm_suspend_again(void);
+extern void cm_prohibit_charging(struct charger_manager *cm);
+extern void cm_allow_charging(struct charger_manager *cm);
 #else
+static void __maybe_unused cm_notify_event(struct charger_manager *cm,
+					   enum cm_irq_types type, char *msg)
+{ }
+
+static struct charger_manager __maybe_unused *get_charger_manager(char *psy_name)
+{
+	return NULL;
+}
+
 static void __maybe_unused setup_charger_manager(struct charger_global_desc *gd)
 { }
+
+static bool is_charger_manager_active(void)
+{
+	return false;
+}
 
 static bool __maybe_unused cm_suspend_again(void)
 {
 	return false;
 }
+static void __maybe_unused cm_prohibit_charging(struct charger_manager *cm) { }
+static void __maybe_unused cm_allow_charging(struct charger_manager *cm) { }
 #endif
 
 #endif /* _CHARGER_MANAGER_H */

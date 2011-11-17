@@ -1041,6 +1041,20 @@ int setup_charger_manager(struct charger_global_desc *gd)
 }
 EXPORT_SYMBOL_GPL(setup_charger_manager);
 
+bool is_charger_manager_active(void)
+{
+	/* Should have called setup_charger_manager */
+	if (!g_desc)
+		return false;
+
+	/* Should have at least one instance of charger_manager */
+	if (list_empty(&cm_list))
+		return false;
+
+	return true;
+}
+EXPORT_SYMBOL_GPL(is_charger_manager_active);
+
 static int charger_manager_probe(struct platform_device *pdev)
 {
 	struct charger_desc *desc = dev_get_platdata(&pdev->dev);
@@ -1493,6 +1507,73 @@ static void __exit charger_manager_cleanup(void)
 	platform_driver_unregister(&charger_manager_driver);
 }
 module_exit(charger_manager_cleanup);
+
+void cm_notify_event(struct charger_manager *cm, enum cm_irq_types type,
+		     char *msg)
+{
+	switch (type) {
+	case CM_IRQ_BATT_FULL:
+		dev_info(cm->dev, "NOTIFY: Battery Fully Charged.\n");
+		uevent_notify(cm, "Battery Fully Charged.");
+
+		if (!cm->desc->fullbatt_vchkdrop_uV ||
+		    !cm->desc->fullbatt_vchkdrop_ms)
+			break;
+
+		cancel_delayed_work(&cm->fullbatt_vchk_work);
+		schedule_delayed_work(&cm->fullbatt_vchk_work, msecs_to_jiffies(
+					cm->desc->fullbatt_vchkdrop_ms));
+		cm->fullbatt_vchk_jiffies_at = jiffies + msecs_to_jiffies(
+					       cm->desc->fullbatt_vchkdrop_ms);
+
+		if (cm->fullbatt_vchk_jiffies_at == 0)
+			cm->fullbatt_vchk_jiffies_at = 1;
+
+		break;
+	case CM_IRQ_BATT_OUT:
+		if (!is_batt_present(cm)) {
+			dev_emerg(cm->dev, "Battery Pulled Out!\n");
+			uevent_notify(cm, default_irq_names[CM_IRQ_BATT_OUT]);
+		} else {
+			uevent_notify(cm, "Battery Reinserted?");
+		}
+		break;
+	case CM_IRQ_BATT_IN:
+	case CM_IRQ_EXT_PWR_IN_OUT ... CM_IRQ_CHG_START_STOP:
+		uevent_notify(cm, default_irq_names[type]);
+		break;
+	case CM_IRQ_UNDESCRIBED:
+	case CM_IRQ_OTHERS:
+		uevent_notify(cm, msg ? msg : default_irq_names[type]);
+		break;
+	default:
+		dev_err(cm->dev, "%s type not specified.\n", __func__);
+		break;
+	}
+}
+EXPORT_SYMBOL_GPL(cm_notify_event);
+
+struct charger_manager *get_charger_manager(char *psy_name)
+{
+	struct power_supply *psy = power_supply_get_by_name(psy_name);
+
+	return container_of(psy, struct charger_manager, charger_psy);
+}
+EXPORT_SYMBOL_GPL(get_charger_manager);
+
+void cm_prohibit_charging(struct charger_manager *cm)
+{
+	cm->user_prohibit = true;
+	try_charger_enable(cm, false);
+}
+EXPORT_SYMBOL_GPL(cm_prohibit_charging);
+
+void cm_allow_charging(struct charger_manager *cm)
+{
+	cm->user_prohibit = false;
+	try_charger_enable(cm, true);
+}
+EXPORT_SYMBOL_GPL(cm_allow_charging);
 
 MODULE_AUTHOR("MyungJoo Ham <myungjoo.ham@samsung.com>");
 MODULE_DESCRIPTION("Charger Manager");
