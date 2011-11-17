@@ -19,8 +19,36 @@
 #include <linux/power_supply.h>
 
 enum data_source {
+	CM_ASSUME_ALWAYS_TRUE,
+	CM_ASSUME_ALWAYS_FALSE,
 	CM_FUEL_GAUGE,
 	CM_CHARGER_STAT,
+};
+
+enum cm_irq_types {
+	CM_IRQ_UNDESCRIBED = 0,
+	CM_IRQ_BATT_FULL,
+	CM_IRQ_BATT_IN,
+	CM_IRQ_BATT_OUT,
+	CM_IRQ_EXT_PWR_IN_OUT,
+	CM_IRQ_CHG_START_STOP,
+	CM_IRQ_OTHERS,
+};
+
+struct charger_irq {
+	unsigned int irq;
+	unsigned long flags;
+	enum cm_irq_types cm_irq_type;
+
+	/*
+	 * wakeup is effective except for FULL and OUT.
+	 * It is always regarded as true for FULL and OUT.
+	 * If true, the irq wakes up the system from suspend.
+	 */
+	bool wakeup;
+
+	/* Optional. If null, default_irq_names is used */
+	const char *name;
 };
 
 enum polling_modes {
@@ -44,6 +72,14 @@ struct charger_global_desc {
 	char *rtc_name;
 
 	bool (*rtc_only_wakeup)(void);
+
+	/*
+	 * Assume that the jiffy timer stops in suspend-to-RAM.
+	 * When enabled, CM does not rely on jiffies value in
+	 * suspend_again and assumes that jiffies value does not
+	 * change during suspend.
+	 */
+	bool assume_timer_stops_in_suspend;
 };
 
 /**
@@ -77,6 +113,14 @@ struct charger_desc {
 	enum polling_modes polling_mode;
 	unsigned int polling_interval_ms;
 
+	/*
+	 * Check voltage drop after the battery is fully charged.
+	 * If it has dropped more than fullbatt_vchkdrop_uV after
+	 * fullbatt_vchkdrop_ms, CM will restart charging.
+	 */
+	unsigned int fullbatt_vchkdrop_ms;
+	unsigned int fullbatt_vchkdrop_uV;
+
 	unsigned int fullbatt_uV;
 
 	enum data_source battery_present;
@@ -87,6 +131,12 @@ struct charger_desc {
 	struct regulator_bulk_data *charger_regulators;
 
 	char *psy_fuel_gauge;
+
+	/*
+	 * The irqs array should end with { .irq=0 } entry
+	 * At least one of irqs should be CM_IRQ_BATT_FULL.
+	 */
+	struct charger_irq *irqs;
 
 	int (*temperature_out_of_range)(int *mC);
 	bool measure_battery_temp;
@@ -120,9 +170,15 @@ struct charger_manager {
 	struct power_supply *fuel_gauge;
 	struct power_supply **charger_stat;
 
+	bool cancel_suspend; /* if there is a pending charger event. */
 	bool charger_enabled;
 
-	int emergency_stop;
+	unsigned long fullbatt_vchk_jiffies_at; /* 0 for N/A */
+	unsigned int fullbatt_vchk_uV;
+	struct delayed_work fullbatt_vchk_work;
+
+	bool user_prohibit;
+	int emergency_stop; /* Do not charge */
 	int last_temp_mC;
 
 	char psy_name_buf[PSY_NAME_MAX + 1];

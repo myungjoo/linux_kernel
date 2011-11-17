@@ -24,6 +24,16 @@
 #include <linux/power/charger-manager.h>
 #include <linux/regulator/consumer.h>
 
+static const char * const default_irq_names[] = {
+	[CM_IRQ_UNDESCRIBED] = "Undescribed",
+	[CM_IRQ_BATT_FULL] = "Battery Full",
+	[CM_IRQ_BATT_IN] = "Battery Inserted",
+	[CM_IRQ_BATT_OUT] = "Battery Pulled Out",
+	[CM_IRQ_EXT_PWR_IN_OUT] = "External Power Attach/Detach",
+	[CM_IRQ_CHG_START_STOP] = "Charging Start/Stop",
+	[CM_IRQ_OTHERS] = "Other battery events"
+};
+
 /*
  * Regard CM_JIFFIES_SMALL jiffies is small enough to ignore for
  * delayed works so that we can run delayed works with CM_JIFFIES_SMALL
@@ -58,6 +68,12 @@ static bool cm_suspended;
 static bool cm_rtc_set;
 static unsigned long cm_suspend_duration_ms;
 
+/* About normal (not suspended) monitoring */
+static unsigned long polling_jiffy = ULONG_MAX; /* ULONG_MAX: no polling */
+static unsigned long next_polling; /* Next appointed polling time */
+static struct workqueue_struct *cm_wq; /* init at driver add */
+static struct delayed_work cm_monitor_work; /* init at driver add */
+
 /* Global charger-manager description */
 static struct charger_global_desc *g_desc; /* init with setup_charger_manager */
 
@@ -72,6 +88,12 @@ static bool is_batt_present(struct charger_manager *cm)
 	int i, ret;
 
 	switch (cm->desc->battery_present) {
+	case CM_ASSUME_ALWAYS_TRUE:
+		present = true;
+		break;
+	case CM_ASSUME_ALWAYS_FALSE:
+		present = false;
+		break;
 	case CM_FUEL_GAUGE:
 		ret = cm->fuel_gauge->get_property(cm->fuel_gauge,
 				POWER_SUPPLY_PROP_PRESENT, &val);
@@ -167,6 +189,8 @@ static bool is_charging(struct charger_manager *cm)
 		/* 1. The charger sholuld not be DISABLED */
 		if (cm->emergency_stop)
 			continue;
+		if (cm->user_prohibit)
+			continue;
 		if (!cm->charger_enabled)
 			continue;
 
@@ -252,7 +276,7 @@ static int try_charger_enable(struct charger_manager *cm, bool enable)
 		return 0;
 
 	if (enable) {
-		if (cm->emergency_stop)
+		if (cm->emergency_stop || cm->user_prohibit)
 			return -EAGAIN;
 		err = regulator_bulk_enable(desc->num_charger_regulators,
 					desc->charger_regulators);
@@ -280,6 +304,28 @@ static int try_charger_enable(struct charger_manager *cm, bool enable)
 		cm->charger_enabled = enable;
 
 	return err;
+}
+
+/**
+ * try_charger_restart - Restart charging.
+ * @cm: the Charger Manager representing the battery.
+ *
+ * Restart charging by turning off and on the charger.
+ */
+static int try_charger_restart(struct charger_manager *cm)
+{
+	int err;
+
+	if (cm->emergency_stop)
+		return -EAGAIN;
+	if (cm->user_prohibit)
+		return -EAGAIN;
+
+	err = try_charger_enable(cm, false);
+	if (err)
+		return err;
+
+	return try_charger_enable(cm, true);
 }
 
 /**
@@ -340,6 +386,47 @@ static void uevent_notify(struct charger_manager *cm, const char *event)
 }
 
 /**
+ * fullbatt_vchk - Check voltage drop some times after "FULL" event.
+ * @work: the work_struct appointing the function
+ *
+ * If a user has designated "fullbatt_vchkdrop_ms/uV" values with
+ * charger_desc, Charger Manager checks voltage drop after the battery
+ * "FULL" event. It checks whether the voltage has dropped more than
+ * fullbatt_vchkdrop_uV by calling this function after fullbatt_vchkrop_ms.
+ */
+static void fullbatt_vchk(struct work_struct *work)
+{
+	struct delayed_work *dwork =
+		container_of(work, struct delayed_work, work);
+	struct charger_manager *cm = container_of(dwork,
+			struct charger_manager, fullbatt_vchk_work);
+	struct charger_desc *desc = cm->desc;
+	int batt_uV, err, diff;
+
+	/* remove the appointment for fullbatt_vchk */
+	cm->fullbatt_vchk_jiffies_at = 0;
+
+	if (!desc->fullbatt_vchkdrop_uV || !desc->fullbatt_vchkdrop_ms)
+		return;
+
+	err = get_batt_uV(cm, &batt_uV);
+	if (err) {
+		dev_err(cm->dev, "%s: get_batt_uV error(%d).\n", __func__, err);
+		return;
+	}
+
+	diff = cm->fullbatt_vchk_uV;
+	diff -= batt_uV;
+
+	dev_dbg(cm->dev, "VBATT dropped %duV after full-batt.\n", diff);
+
+	if (diff > desc->fullbatt_vchkdrop_uV) {
+		try_charger_restart(cm);
+		uevent_notify(cm, "Recharge");
+	}
+}
+
+/**
  * _cm_monitor - Monitor the temperature and return true for exceptions.
  * @cm: the Charger Manager representing the battery.
  *
@@ -394,6 +481,256 @@ static bool cm_monitor(void)
 	mutex_unlock(&cm_list_mtx);
 
 	return stop;
+}
+
+/**
+ * _setup_polling - Setup the next instance of polling.
+ * @work: work_struct of the function _setup_polling.
+ */
+static void _setup_polling(struct work_struct *work)
+{
+	unsigned long min = ULONG_MAX;
+	struct charger_manager *cm;
+	bool keep_polling = false;
+	unsigned long _next_polling;
+
+	mutex_lock(&cm_list_mtx);
+
+	list_for_each_entry(cm, &cm_list, entry) {
+		if (is_polling_required(cm) && cm->desc->polling_interval_ms) {
+			keep_polling = true;
+
+			if (min > cm->desc->polling_interval_ms)
+				min = cm->desc->polling_interval_ms;
+		}
+	}
+
+	polling_jiffy = msecs_to_jiffies(min);
+	if (polling_jiffy <= CM_JIFFIES_SMALL)
+		polling_jiffy = CM_JIFFIES_SMALL + 1;
+
+	if (!keep_polling)
+		polling_jiffy = ULONG_MAX;
+	if (polling_jiffy == ULONG_MAX)
+		goto out;
+
+	WARN(cm_wq == NULL, "charger-manager: workqueue not initialized"
+			    ". try it later. %s\n", __func__);
+
+	_next_polling = jiffies + polling_jiffy;
+
+	if (!delayed_work_pending(&cm_monitor_work) ||
+	    (delayed_work_pending(&cm_monitor_work) &&
+	     time_after(next_polling, _next_polling))) {
+		cancel_delayed_work(&cm_monitor_work);
+		next_polling = jiffies + polling_jiffy;
+		queue_delayed_work(cm_wq, &cm_monitor_work, polling_jiffy);
+	}
+
+out:
+	mutex_unlock(&cm_list_mtx);
+}
+static DECLARE_WORK(setup_polling, _setup_polling);
+
+/**
+ * cm_monitor_poller - The Monitor / Poller.
+ * @work: work_struct of the function cm_monitor_poller
+ *
+ * During non-suspended state, cm_monitor_poller is used to poll and monitor
+ * the batteries.
+ */
+static void cm_monitor_poller(struct work_struct *work)
+{
+	cm_monitor();
+	schedule_work(&setup_polling);
+}
+
+/**
+ * fullbatt_handler - Interrupt handler for CM_IRQ_BATT_FULL
+ * @irq: irq number
+ * @data: the Charger Manager representing the battery.
+ */
+static irqreturn_t fullbatt_handler(int irq, void *data)
+{
+	struct charger_manager *cm = data;
+	struct charger_desc *desc = cm->desc;
+
+	if (!desc->fullbatt_vchkdrop_uV || !desc->fullbatt_vchkdrop_ms)
+		goto out;
+
+	if (cm_suspended)
+		cm->cancel_suspend = true;
+
+	cancel_delayed_work(&cm->fullbatt_vchk_work);
+	queue_delayed_work(cm_wq, &cm->fullbatt_vchk_work,
+			   msecs_to_jiffies(desc->fullbatt_vchkdrop_ms));
+	cm->fullbatt_vchk_jiffies_at = jiffies + msecs_to_jiffies(
+				       desc->fullbatt_vchkdrop_ms);
+
+	if (cm->fullbatt_vchk_jiffies_at == 0)
+		cm->fullbatt_vchk_jiffies_at = 1;
+
+out:
+	dev_info(cm->dev, "IRQHANDLE: Battery Fully Charged.\n");
+	uevent_notify(cm, default_irq_names[CM_IRQ_BATT_FULL]);
+
+	return IRQ_HANDLED;
+}
+
+/**
+ * battout_handler - Interrupt handler for CM_BATT_OUT
+ * @irq: irq number
+ * @data: the Charger Manager representing the battery.
+ */
+static irqreturn_t battout_handler(int irq, void *data)
+{
+	struct charger_manager *cm = data;
+
+	if (cm_suspended)
+		cm->cancel_suspend = true;
+
+	if (!is_batt_present(cm)) {
+		dev_emerg(cm->dev, "Battery Pulled Out!\n");
+		uevent_notify(cm, default_irq_names[CM_IRQ_BATT_OUT]);
+	} else {
+		uevent_notify(cm, "Battery Reinserted?");
+	}
+
+	return IRQ_HANDLED;
+}
+
+/**
+ * misc_event_handler - Handler for other interrupts w/ wakeup=false
+ * @irq: irq number
+ * @data: the Charger Manager representing the battery.
+ */
+static irqreturn_t misc_event_handler(int irq, void *data)
+{
+	struct charger_manager *cm = data;
+	char buf[UEVENT_BUF_SIZE + 1];
+
+	sprintf(buf, "IRQ %d", irq);
+	uevent_notify(cm, buf);
+
+	if (!delayed_work_pending(&cm_monitor_work) &&
+	    is_polling_required(cm) && cm->desc->polling_interval_ms)
+		schedule_work(&setup_polling);
+
+	return IRQ_HANDLED;
+}
+
+/**
+ * misc_event_handler_force_wk - Handler for other interrupts w/ wakeup=true
+ * @irq: irq number
+ * @data: the Charger Manager representing the battery.
+ */
+static irqreturn_t misc_event_handler_force_wk(int irq, void *data)
+{
+	struct charger_manager *cm = data;
+	char buf[UEVENT_BUF_SIZE + 1];
+
+	if (cm_suspended)
+		cm->cancel_suspend = true;
+
+	sprintf(buf, "IRQ %d", irq);
+	uevent_notify(cm, buf);
+
+	if (!delayed_work_pending(&cm_monitor_work) &&
+	    is_polling_required(cm) && cm->desc->polling_interval_ms)
+		schedule_work(&setup_polling);
+
+	return IRQ_HANDLED;
+}
+
+/**
+ * cm_setup_timer - For in-suspend monitoring setup wakeup alarm
+ *		    for suspend_again.
+ *
+ * Returns true if the alarm is set for Charger Manager to use.
+ * Returns false if
+ *	cm_setup_timer fails to set an alarm,
+ *	cm_setup_timer does not need to set an alarm for Charger Manager,
+ *	or an alarm previously configured is to be used.
+ */
+static bool cm_setup_timer(void)
+{
+	struct charger_manager *cm;
+	unsigned int wakeup_ms = UINT_MAX;
+	bool ret = false;
+
+	mutex_lock(&cm_list_mtx);
+
+	list_for_each_entry(cm, &cm_list, entry) {
+		unsigned int fbchk_ms = 0;
+
+		/* fullbatt_vchk is required. setup timer for that */
+		if (cm->fullbatt_vchk_jiffies_at) {
+			fbchk_ms = jiffies_to_msecs(cm->fullbatt_vchk_jiffies_at
+						    - jiffies);
+			if (cm->fullbatt_vchk_jiffies_at <= jiffies ||
+				msecs_to_jiffies(fbchk_ms) < CM_JIFFIES_SMALL) {
+				fullbatt_vchk(&cm->fullbatt_vchk_work.work);
+				fbchk_ms = 0;
+			}
+		}
+		CM_MIN_VALID(wakeup_ms, fbchk_ms);
+
+		/* Skip if polling is not required for this CM */
+		if (!is_polling_required(cm) && !cm->emergency_stop)
+			continue;
+		if (cm->desc->polling_interval_ms == 0)
+			continue;
+		CM_MIN_VALID(wakeup_ms, cm->desc->polling_interval_ms);
+	}
+
+	mutex_unlock(&cm_list_mtx);
+
+	if (wakeup_ms < UINT_MAX && wakeup_ms > 0) {
+		pr_info("Charger Manager wakeup timer: %u ms.\n", wakeup_ms);
+		if (rtc_dev) {
+			struct rtc_wkalrm tmp;
+			unsigned long time, now;
+			unsigned long add = DIV_ROUND_UP(wakeup_ms, 1000);
+
+			/*
+			 * Set alarm with the polling interval (wakeup_ms)
+			 * except when rtc_wkalarm_save comes first.
+			 * However, the alarm time should be NOW +
+			 * CM_RTC_SMALL or later.
+			 */
+			tmp.enabled = 1;
+			rtc_read_time(rtc_dev, &tmp.time);
+			rtc_tm_to_time(&tmp.time, &now);
+			if (add < CM_RTC_SMALL)
+				add = CM_RTC_SMALL;
+			time = now + add;
+
+			ret = true;
+
+			if (rtc_wkalarm_save.enabled && rtc_wkalarm_save_time &&
+			    rtc_wkalarm_save_time < time) {
+				if (rtc_wkalarm_save_time < now + CM_RTC_SMALL)
+					time = now + CM_RTC_SMALL;
+				else
+					time = rtc_wkalarm_save_time;
+
+				/* The timer is not appointed by CM */
+				ret = false;
+			}
+
+			pr_info("Waking up after %lu secs.\n",
+					time - now);
+
+			rtc_time_to_tm(time, &tmp.time);
+			rtc_set_alarm(rtc_dev, &tmp);
+			cm_suspend_duration_ms += wakeup_ms;
+			return ret;
+		}
+	}
+
+	if (rtc_dev)
+		rtc_set_alarm(rtc_dev, &rtc_wkalarm_save);
+	return false;
 }
 
 static int charger_get_property(struct power_supply *psy,
@@ -598,81 +935,24 @@ static struct power_supply psy_default = {
 	.get_property = charger_get_property,
 };
 
-/**
- * cm_setup_timer - For in-suspend monitoring setup wakeup alarm
- *		    for suspend_again.
- *
- * Returns true if the alarm is set for Charger Manager to use.
- * Returns false if
- *	cm_setup_timer fails to set an alarm,
- *	cm_setup_timer does not need to set an alarm for Charger Manager,
- *	or an alarm previously configured is to be used.
- */
-static bool cm_setup_timer(void)
+static bool _cm_fbchk_in_suspend(struct charger_manager *cm)
 {
-	struct charger_manager *cm;
-	unsigned int wakeup_ms = UINT_MAX;
-	bool ret = false;
+	unsigned long jiffy_now = jiffies;
 
-	mutex_lock(&cm_list_mtx);
+	if (!cm->fullbatt_vchk_jiffies_at)
+		return false;
 
-	list_for_each_entry(cm, &cm_list, entry) {
-		/* Skip if polling is not required for this CM */
-		if (!is_polling_required(cm) && !cm->emergency_stop)
-			continue;
-		if (cm->desc->polling_interval_ms == 0)
-			continue;
-		CM_MIN_VALID(wakeup_ms, cm->desc->polling_interval_ms);
+	if (g_desc && g_desc->assume_timer_stops_in_suspend)
+		jiffy_now += msecs_to_jiffies(cm_suspend_duration_ms);
+
+	/* Execute now if it's going to be executed not too long after */
+	jiffy_now += CM_JIFFIES_SMALL;
+
+	if (time_after_eq(jiffy_now, cm->fullbatt_vchk_jiffies_at)) {
+		fullbatt_vchk(&cm->fullbatt_vchk_work.work);
+		return true;
 	}
 
-	mutex_unlock(&cm_list_mtx);
-
-	if (wakeup_ms < UINT_MAX && wakeup_ms > 0) {
-		pr_info("Charger Manager wakeup timer: %u ms.\n", wakeup_ms);
-		if (rtc_dev) {
-			struct rtc_wkalrm tmp;
-			unsigned long time, now;
-			unsigned long add = DIV_ROUND_UP(wakeup_ms, 1000);
-
-			/*
-			 * Set alarm with the polling interval (wakeup_ms)
-			 * except when rtc_wkalarm_save comes first.
-			 * However, the alarm time should be NOW +
-			 * CM_RTC_SMALL or later.
-			 */
-			tmp.enabled = 1;
-			rtc_read_time(rtc_dev, &tmp.time);
-			rtc_tm_to_time(&tmp.time, &now);
-			if (add < CM_RTC_SMALL)
-				add = CM_RTC_SMALL;
-			time = now + add;
-
-			ret = true;
-
-			if (rtc_wkalarm_save.enabled &&
-			    rtc_wkalarm_save_time &&
-			    rtc_wkalarm_save_time < time) {
-				if (rtc_wkalarm_save_time < now + CM_RTC_SMALL)
-					time = now + CM_RTC_SMALL;
-				else
-					time = rtc_wkalarm_save_time;
-
-				/* The timer is not appointed by CM */
-				ret = false;
-			}
-
-			pr_info("Waking up after %lu secs.\n",
-					time - now);
-
-			rtc_time_to_tm(time, &tmp.time);
-			rtc_set_alarm(rtc_dev, &tmp);
-			cm_suspend_duration_ms += wakeup_ms;
-			return ret;
-		}
-	}
-
-	if (rtc_dev)
-		rtc_set_alarm(rtc_dev, &rtc_wkalarm_save);
 	return false;
 }
 
@@ -690,6 +970,9 @@ bool cm_suspend_again(void)
 	if (!g_desc || !g_desc->rtc_only_wakeup || !g_desc->rtc_only_wakeup() ||
 	    !cm_rtc_set)
 		return false;
+	if (cm_wq == NULL) /* CM not initialized */
+		return false;
+
 
 	if (cm_monitor())
 		goto out;
@@ -697,6 +980,8 @@ bool cm_suspend_again(void)
 	ret = true;
 	mutex_lock(&cm_list_mtx);
 	list_for_each_entry(cm, &cm_list, entry) {
+		_cm_fbchk_in_suspend(cm);
+
 		if (cm->status_save_ext_pwr_inserted != is_ext_pwr_online(cm) ||
 		    cm->status_save_batt != is_batt_present(cm))
 			ret = false;
@@ -762,6 +1047,7 @@ static int charger_manager_probe(struct platform_device *pdev)
 	struct charger_manager *cm;
 	int ret = 0, i = 0;
 	union power_supply_propval val;
+	bool batt_full_registered = false;
 
 	if (g_desc && !rtc_dev && g_desc->rtc_name) {
 		rtc_dev = rtc_class_open(g_desc->rtc_name);
@@ -797,6 +1083,21 @@ static int charger_manager_probe(struct platform_device *pdev)
 	}
 	memcpy(cm->desc, desc, sizeof(struct charger_desc));
 	cm->last_temp_mC = INT_MIN; /* denotes "unmeasured, yet" */
+
+	/*
+	 * The following two do not need to be errors.
+	 * Users may intentionally ignore those two features.
+	 */
+	if (desc->fullbatt_uV == 0) {
+		dev_info(&pdev->dev, "Ignoring full-battery voltage threshold"
+					" as it is not supplied.");
+	}
+	if (!desc->fullbatt_vchkdrop_ms || !desc->fullbatt_vchkdrop_uV) {
+		dev_info(&pdev->dev, "Disabling full-battery voltage drop "
+				"checking mechanism as it is not supplied.");
+		desc->fullbatt_vchkdrop_ms = 0;
+		desc->fullbatt_vchkdrop_uV = 0;
+	}
 
 	if (!desc->charger_regulators || desc->num_charger_regulators < 1) {
 		ret = -EINVAL;
@@ -906,12 +1207,14 @@ static int charger_manager_probe(struct platform_device *pdev)
 		cm->charger_psy.num_properties++;
 	}
 
-	ret = power_supply_register(NULL, &cm->charger_psy);
-	if (ret) {
-		dev_err(&pdev->dev, "Cannot register charger-manager with"
-				" name \"%s\".\n", cm->charger_psy.name);
-		goto err_register;
+	if (!desc->irqs || !desc->irqs[0].irq) {
+		dev_err(&pdev->dev, "No IRQs specified");
+		ret = -EINVAL;
+		goto err_no_irq;
 	}
+
+	/* Fullbat vchk should be ready before registering irq handlers */
+	INIT_DELAYED_WORK(&cm->fullbatt_vchk_work, fullbatt_vchk);
 
 	ret = regulator_bulk_get(&pdev->dev, desc->num_charger_regulators,
 				 desc->charger_regulators);
@@ -926,20 +1229,85 @@ static int charger_manager_probe(struct platform_device *pdev)
 		goto err_chg_enable;
 	}
 
+	for (i = 0; desc->irqs[i].irq; i++) {
+		struct charger_irq *irq = &desc->irqs[i];
+
+		ret = 0;
+		switch (irq->cm_irq_type) {
+		case CM_IRQ_BATT_FULL:
+			ret = request_threaded_irq(irq->irq, NULL,
+					fullbatt_handler, irq->flags,
+					irq->name ? irq->name :
+					default_irq_names[CM_IRQ_BATT_FULL],
+					cm);
+			batt_full_registered = true;
+			break;
+		case CM_IRQ_BATT_OUT:
+			ret = request_threaded_irq(irq->irq, NULL,
+					battout_handler, irq->flags,
+					irq->name ? irq->name :
+					default_irq_names[CM_IRQ_BATT_OUT],
+					cm);
+			break;
+		default:
+			ret = request_threaded_irq(irq->irq, NULL,
+				irq->wakeup ? misc_event_handler_force_wk :
+					      misc_event_handler,
+				irq->flags, irq->name ? irq->name :
+				default_irq_names[irq->cm_irq_type], cm);
+			break;
+		}
+
+		if (ret) {
+			dev_err(&pdev->dev,
+				"IRQ %d (%s/%s) has an error(%d).\n",
+				irq->irq, default_irq_names[irq->cm_irq_type],
+				irq->name, ret);
+			for (i = i - 1; i >= 0; i--)
+				free_irq(desc->irqs[i].irq, cm);
+			goto err_request_irq;
+		}
+
+		dev_dbg(&pdev->dev, "Interupt handler for %s(%s) @ IRQ %d"
+				    " is registered.\n",
+				    default_irq_names[irq->cm_irq_type],
+				    irq->name, irq->irq);
+	}
+
+	if (!batt_full_registered) {
+		dev_err(&pdev->dev, "Interrupt handler for %s is required.\n",
+				default_irq_names[CM_IRQ_BATT_FULL]);
+		ret = EINVAL;
+		goto err_irq;
+	}
+
+	ret = power_supply_register(NULL, &cm->charger_psy);
+	if (ret) {
+		dev_err(&pdev->dev, "Cannot register charger-manager with"
+				" name \"%s\".\n", cm->charger_psy.name);
+		goto err_irq;
+	}
+
 	/* Add to the list */
 	mutex_lock(&cm_list_mtx);
 	list_add(&cm->entry, &cm_list);
 	mutex_unlock(&cm_list_mtx);
 
+	schedule_work(&setup_polling);
+
 	return 0;
 
+err_irq:
+	for (i = 0; desc->irqs[i].irq; i++)
+		free_irq(desc->irqs[i].irq, cm);
+err_request_irq:
+	try_charger_enable(cm, false);
 err_chg_enable:
 	if (desc->charger_regulators)
 		regulator_bulk_free(desc->num_charger_regulators,
 					desc->charger_regulators);
 err_bulk_get:
-	power_supply_unregister(&cm->charger_psy);
-err_register:
+err_no_irq:
 	kfree(cm->charger_psy.properties);
 err_chg_stat:
 	kfree(cm->charger_stat);
@@ -956,17 +1324,25 @@ static int __devexit charger_manager_remove(struct platform_device *pdev)
 {
 	struct charger_manager *cm = platform_get_drvdata(pdev);
 	struct charger_desc *desc = cm->desc;
+	int i;
 
 	/* Remove from the list */
 	mutex_lock(&cm_list_mtx);
 	list_del(&cm->entry);
 	mutex_unlock(&cm_list_mtx);
 
+	schedule_work(&setup_polling);
+
+	power_supply_unregister(&cm->charger_psy);
+
+	for (i = 0; desc->irqs[i].irq; i++)
+		free_irq(desc->irqs[i].irq, cm);
+
+	try_charger_enable(cm, false);
 	if (desc->charger_regulators)
 		regulator_bulk_free(desc->num_charger_regulators,
 					desc->charger_regulators);
 
-	power_supply_unregister(&cm->charger_psy);
 	kfree(cm->charger_psy.properties);
 	kfree(cm->charger_stat);
 	kfree(cm->desc);
@@ -979,6 +1355,20 @@ const struct platform_device_id charger_manager_id[] = {
 	{ "charger-manager", 0 },
 	{ },
 };
+
+static int cm_suspend_noirq(struct device *dev)
+{
+	struct platform_device *pdev = container_of(dev, struct platform_device,
+						    dev);
+	struct charger_manager *cm = platform_get_drvdata(pdev);
+
+	if (cm->cancel_suspend) {
+		cm->cancel_suspend = false;
+		return -EAGAIN;
+	}
+
+	return 0;
+}
 
 static int cm_suspend_prepare(struct device *dev)
 {
@@ -1007,6 +1397,7 @@ static int cm_suspend_prepare(struct device *dev)
 		cm_suspended = true;
 	}
 
+	cancel_delayed_work(&cm->fullbatt_vchk_work);
 	cm->status_save_ext_pwr_inserted = is_ext_pwr_online(cm);
 	cm->status_save_batt = is_batt_present(cm);
 
@@ -1036,11 +1427,41 @@ static void cm_suspend_complete(struct device *dev)
 		cm_rtc_set = false;
 	}
 
+	/* Re-enqueue delayed work (fullbatt_vchk_work) */
+	if (cm->fullbatt_vchk_jiffies_at) {
+		unsigned long delay = 0;
+		unsigned long now = jiffies;
+
+		if (time_after_eq(now + CM_JIFFIES_SMALL,
+				  cm->fullbatt_vchk_jiffies_at)) {
+			delay = (unsigned long)((long)(now + CM_JIFFIES_SMALL)
+				- (long)(cm->fullbatt_vchk_jiffies_at));
+			delay = jiffies_to_msecs(delay);
+		} else {
+			delay = 0;
+		}
+
+		/*
+		 * Account for cm_suspend_duration_ms if
+		 * assume_timer_stops_in_suspend is active
+		 */
+		if (g_desc && g_desc->assume_timer_stops_in_suspend) {
+			if (delay > cm_suspend_duration_ms)
+				delay -= cm_suspend_duration_ms;
+			else
+				delay = 0;
+		}
+
+		queue_delayed_work(cm_wq, &cm->fullbatt_vchk_work,
+				   msecs_to_jiffies(delay));
+	}
+	cm->cancel_suspend = false;
 	uevent_notify(cm, NULL);
 }
 
 static const struct dev_pm_ops charger_manager_pm = {
 	.prepare	= cm_suspend_prepare,
+	.suspend_noirq	= cm_suspend_noirq,
 	.complete	= cm_suspend_complete,
 };
 
@@ -1057,12 +1478,18 @@ static struct platform_driver charger_manager_driver = {
 
 static int __init charger_manager_init(void)
 {
+	cm_wq = create_freezable_workqueue("charger_manager");
+	INIT_DELAYED_WORK(&cm_monitor_work, cm_monitor_poller);
+
 	return platform_driver_register(&charger_manager_driver);
 }
 late_initcall(charger_manager_init);
 
 static void __exit charger_manager_cleanup(void)
 {
+	destroy_workqueue(cm_wq);
+	cm_wq = NULL;
+
 	platform_driver_unregister(&charger_manager_driver);
 }
 module_exit(charger_manager_cleanup);
