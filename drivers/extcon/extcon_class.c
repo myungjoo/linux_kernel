@@ -31,6 +31,25 @@
 #include <linux/extcon.h>
 #include <linux/slab.h>
 
+const char *extcon_cable_name[] = {
+	[EXTCON_USB]		= "USB",
+	[EXTCON_USB_HOST]	= "USB-Host",
+	[EXTCON_TA]		= "TA",
+	[EXTCON_FAST_CHARGER]	= "Fast-charger",
+	[EXTCON_SLOW_CHARGER]	= "Slow-charger",
+	[EXTCON_CHARGE_DOWNSTREAM]	= "Charge-downstream",
+	[EXTCON_HDMI]		= "HDMI",
+	[EXTCON_MHL]		= "MHL",
+	[EXTCON_DVI]		= "DVI",
+	[EXTCON_VGA]		= "VGA",
+	[EXTCON_DOCK]		= "Dock",
+	[EXTCON_AUDIO_IN]	= "Audio-in",
+	[EXTCON_AUDIO_OUT]	= "Audio-out",
+	[EXTCON_VIDEO_IN]	= "Video-in",
+	[EXTCON_VIDEO_OUT]	= "Video-out",
+
+	NULL,
+};
 struct class *extcon_class;
 struct class *extcon_class_for_android;
 
@@ -40,6 +59,7 @@ static DEFINE_MUTEX(extcon_dev_list_lock);
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
+	int i, count = 0;
 	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
 
 	if (edev->print_state) {
@@ -49,7 +69,55 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			return ret;
 		/* Use default if failed */
 	}
-	return sprintf(buf, "%u\n", edev->state);
+
+	if (edev->max_supported == 0)
+		return sprintf(buf, "%u\n", edev->state);
+
+	for (i = 0; i < SUPPORTED_CABLE_MAX; i++) {
+		if (!edev->supported_cable[i])
+			break;
+		count += sprintf(buf + count, "%s=%d\n",
+				 edev->supported_cable[i],
+				 !!(edev->state & (1 << i)));
+	}
+
+	return count;
+}
+
+void extcon_set_state(struct extcon_dev *edev, u32 state);
+static ssize_t state_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	u32 state;
+	ssize_t ret = 0;
+	int enabled;
+	char *buffer = kzalloc(count + 1, GFP_KERNEL);
+	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
+
+	/* Format: /Documentation/ABI/testing/sysfs-class-extcon */
+	ret = sscanf(buf, "%s %d", buffer, &enabled);
+
+	/* TODO: remove before submit */
+	pr_info("[%s][%d]\n", buffer, enabled);
+
+	if (ret == 2) {
+		/* Method 1 */
+		ret = extcon_set_cable_state(edev, buffer, enabled);
+		pr_info("Method 1\n");
+	} else if (ret == 1) {
+		/* Method 2 */
+		ret = sscanf(buf, "0x%x", &state);
+		pr_info("Method 2 with 0x%x\n", state);
+		if (ret == 0)
+			ret = -EINVAL;
+		else
+			extcon_set_state(edev, state);
+	} else {
+		ret = -EINVAL;
+	}
+
+	kfree(buffer);
+	return ret;
 }
 
 static ssize_t name_show(struct device *dev, struct device_attribute *attr,
@@ -68,8 +136,10 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 }
 
 /**
- * extcon_set_state() - Set the cable attach states of the extcon device.
+ * extcon_update_state() - Update the cable attach states of the extcon device
+ *			only for the masked bits.
  * @edev:	the extcon device
+ * @mask:	the bit mask to designate updated bits.
  * @state:	new cable attach status for @edev
  *
  * Changing the state sends uevent with environment variable containing
@@ -77,10 +147,10 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
  * Tizen uses this format for extcon device to get events from ports.
  * Android uses this format as well.
  *
- * Note that notifier provides the which bits are changes in the state
- * variable with "val" to the callback.
+ * Note that the notifier provides which bits are changed in the state
+ * variable with the val parameter (second) to the callback.
  */
-void extcon_set_state(struct extcon_dev *edev, u32 state)
+void extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 {
 	char name_buf[120];
 	char state_buf[120];
@@ -88,15 +158,20 @@ void extcon_set_state(struct extcon_dev *edev, u32 state)
 	char *envp[3];
 	int env_offset = 0;
 	int length;
-	u32 old_state = edev->state;
+	unsigned long flags;
 
-	if (edev->state != state) {
-		edev->state = state;
+	spin_lock_irqsave(&edev->lock, flags);
 
-		raw_notifier_call_chain(&edev->nh, old_state ^ edev->state,
-					edev);
+	if (edev->state != ((edev->state & ~mask) | (state & mask))) {
+		u32 old_state = edev->state;
 
-		prop_buf = (char *)get_zeroed_page(GFP_KERNEL);
+		edev->state &= ~mask;
+		edev->state |= state & mask;
+
+		raw_notifier_call_chain(&edev->nh, old_state, edev);
+
+		/* This could be in interrupt handler */
+		prop_buf = (char *)get_zeroed_page(GFP_ATOMIC);
 		if (prop_buf) {
 			length = name_show(edev->dev, NULL, prop_buf);
 			if (length > 0) {
@@ -115,15 +190,130 @@ void extcon_set_state(struct extcon_dev *edev, u32 state)
 				envp[env_offset++] = state_buf;
 			}
 			envp[env_offset] = NULL;
+			/* Unlock early before uevent */
+			spin_unlock_irqrestore(&edev->lock, flags);
+
 			kobject_uevent_env(&edev->dev->kobj, KOBJ_CHANGE, envp);
 			free_page((unsigned long)prop_buf);
 		} else {
+			/* Unlock early before uevent */
+			spin_unlock_irqrestore(&edev->lock, flags);
+
 			dev_err(edev->dev, "out of memory in extcon_set_state\n");
 			kobject_uevent(&edev->dev->kobj, KOBJ_CHANGE);
 		}
+	} else {
+		/* No changes */
+		spin_unlock_irqrestore(&edev->lock, flags);
 	}
 }
+EXPORT_SYMBOL_GPL(extcon_update_state);
+
+/**
+ * extcon_set_state() - Set the cable attach states of the extcon device.
+ * @edev:	the extcon device
+ * @state:	new cable attach status for @edev
+ *
+ * Note that notifier provides which bits are changed in the state
+ * variable with the val parameter (second) to the callback.
+ */
+void extcon_set_state(struct extcon_dev *edev, u32 state)
+{
+	extcon_update_state(edev, 0xffffffff, state);
+}
 EXPORT_SYMBOL_GPL(extcon_set_state);
+
+/**
+ * extcon_find_cable_index() - Get the cable index based on the cable name.
+ * @edev:	the extcon device that has the cable.
+ * @cable_name:	cable name to be searched.
+ *
+ * Note that accessing a cable state based on cable_index is faster than
+ * cable_name because using cable_name induces a loop with strncmp().
+ * Thus, when get/set_cable_state is repeatedly used, using cable_index
+ * is recommended.
+ */
+int extcon_find_cable_index(struct extcon_dev *edev, const char *cable_name)
+{
+	int i;
+
+	if (edev->supported_cable) {
+		for (i = 0; edev->supported_cable[i]; i++) {
+			if (!strncmp(edev->supported_cable[i],
+				cable_name, CABLE_NAME_MAX))
+				return i;
+		}
+	}
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL_GPL(extcon_find_cable_index);
+
+/**
+ * extcon_get_cable_state_() - Get the status of a specific cable.
+ * @edev:	the extcon device that has the cable.
+ * @index:	cable index that can be retrieved by extcon_find_cable_index().
+ */
+int extcon_get_cable_state_(struct extcon_dev *edev, int index)
+{
+	if (index < 0 || (edev->max_supported && edev->max_supported <= index))
+		return -EINVAL;
+
+	return !!(edev->state & (1 << index));
+}
+EXPORT_SYMBOL_GPL(extcon_get_cable_state_);
+
+/**
+ * extcon_get_cable_state() - Get the status of a specific cable.
+ * @edev:	the extcon device that has the cable.
+ * @cable_name:	cable name.
+ *
+ * Note that this is slower than extcon_get_cable_state_.
+ */
+int extcon_get_cable_state(struct extcon_dev *edev, const char *cable_name)
+{
+	return extcon_get_cable_state_(edev, extcon_find_cable_index
+						(edev, cable_name));
+}
+EXPORT_SYMBOL_GPL(extcon_get_cable_state);
+
+/**
+ * extcon_get_cable_state_() - Set the status of a specific cable.
+ * @edev:	the extcon device that has the cable.
+ * @index:	cable index that can be retrieved by extcon_find_cable_index().
+ * @cable_state:	the new cable status. The default semantics is
+ *			true: attached / false: detached.
+ */
+int extcon_set_cable_state_(struct extcon_dev *edev,
+			int index, bool cable_state)
+{
+	u32 state;
+
+	if (index < 0 || (edev->max_supported && edev->max_supported <= index))
+		return -EINVAL;
+
+	state = cable_state ? (1 << index) : 0;
+	extcon_update_state(edev, 1 << index, state);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(extcon_set_cable_state_);
+
+/**
+ * extcon_get_cable_state() - Set the status of a specific cable.
+ * @edev:	the extcon device that has the cable.
+ * @cable_name:	cable name.
+ * @cable_state:	the new cable status. The default semantics is
+ *			true: attached / false: detached.
+ *
+ * Note that this is slower than extcon_set_cable_state_.
+ */
+int extcon_set_cable_state(struct extcon_dev *edev,
+			const char *cable_name, bool cable_state)
+{
+	return extcon_set_cable_state_(edev, extcon_find_cable_index
+					(edev, cable_name), cable_state);
+}
+EXPORT_SYMBOL_GPL(extcon_set_cable_state);
 
 /**
  * extcon_get_extcon_dev() - Get the extcon device instance from the name
@@ -145,11 +335,88 @@ out:
 }
 EXPORT_SYMBOL_GPL(extcon_get_extcon_dev);
 
+static int _call_per_cable(struct notifier_block *nb, unsigned long val,
+			   void *ptr)
+{
+	struct extcon_specific_cable_nb *obj = container_of(nb,
+			struct extcon_specific_cable_nb, internal_nb);
+	struct extcon_dev *edev = ptr;
+
+	if ((val & (1 << obj->cable_index)) !=
+	    (edev->state & (1 << obj->cable_index))) {
+		obj->previous_value = val;
+		return obj->user_nb->notifier_call(nb, val, ptr);
+	}
+
+	return NOTIFY_OK;
+}
+
+/**
+ * extcon_register_interest() - Register a notifier for a state change of a
+ *			      specific cable, not a entier set of cables of a
+ *			      extcon device.
+ * @obj:	an empty extcon_specific_cable_nb object to be returned.
+ * @extcon_name:	the name of extcon device.
+ * @cable_name:		the target cable name.
+ * @nb:		the notifier block to get notified.
+ *
+ * Provide an empty extcon_specific_cable_nb. extcon_register_interest() sets
+ * the struct for you.
+ *
+ * extcon_register_interest is a helper function for those who want to get
+ * notification for a single specific cable's status change. If a user wants
+ * to get notification for any changes of all cables of a extcon device,
+ * he/she should use the general extcon_register_notifier().
+ *
+ * Note that the second parameter given to the callback of nb (val) is
+ * "old_state", not the current state. The current state can be retrieved
+ * by looking at the third pameter (edev pointer)'s state value.
+ */
+int extcon_register_interest(struct extcon_specific_cable_nb *obj,
+			     const char *extcon_name, const char *cable_name,
+			     struct notifier_block *nb)
+{
+	if (!obj || !extcon_name || !cable_name || !nb)
+		return -EINVAL;
+
+	obj->edev = extcon_get_extcon_dev(extcon_name);
+	if (!obj->edev)
+		return -ENODEV;
+
+	obj->cable_index = extcon_find_cable_index(obj->edev, cable_name);
+	if (obj->cable_index < 0)
+		return -ENODEV;
+
+	obj->user_nb = nb;
+
+	obj->internal_nb.notifier_call = _call_per_cable;
+
+	return raw_notifier_chain_register(&obj->edev->nh, &obj->internal_nb);
+}
+
+/**
+ * extcon_unregister_interest() - Unregister the notifier registered by
+ *				extcon_register_interest().
+ * @obj:	the extcon_specific_cable_nb object returned by
+ *		extcon_register_interest().
+ */
+int extcon_unregister_interest(struct extcon_specific_cable_nb *obj)
+{
+	if (!obj)
+		return -EINVAL;
+
+	return raw_notifier_chain_unregister(&obj->edev->nh, &obj->internal_nb);
+}
+
 /**
  * extcon_register_notifier() - Register a notifee to get notified by
  *			      any attach status changes from the extcon.
  * @edev:	the extcon device.
  * @nb:		a notifier block to be registered.
+ *
+ * Note that the second parameter given to the callback of nb (val) is
+ * "old_state", not the current state. The current state can be retrieved
+ * by looking at the third pameter (edev pointer)'s state value.
  */
 int extcon_register_notifier(struct extcon_dev *edev,
 			struct notifier_block *nb)
@@ -171,8 +438,9 @@ int extcon_unregister_notifier(struct extcon_dev *edev,
 EXPORT_SYMBOL_GPL(extcon_unregister_notifier);
 
 static struct device_attribute extcon_attrs[] = {
-	__ATTR_RO(state),
+	__ATTR(state, S_IRUGO | S_IWUSR, state_show, state_store),
 	__ATTR_RO(name),
+	__ATTR_NULL,
 };
 
 static int create_extcon_class(void)
@@ -231,7 +499,7 @@ static void extcon_dev_release(struct device *dev)
  */
 int extcon_dev_register(struct extcon_dev *edev, struct device *dev)
 {
-	int ret;
+	int ret, index = 0;
 
 	if (!extcon_class && !edev->use_class_name_switch) {
 		ret = create_extcon_class();
@@ -242,6 +510,20 @@ int extcon_dev_register(struct extcon_dev *edev, struct device *dev)
 		ret = create_extcon_class_for_android();
 		if (ret < 0)
 			return ret;
+	}
+
+	if (edev->supported_cable) {
+		/* Get size of array */
+		for (index = 0; edev->supported_cable[index]; index++)
+			;
+		edev->max_supported = index;
+	} else {
+		edev->max_supported = 0;
+	}
+
+	if (index > SUPPORTED_CABLE_MAX) {
+		dev_err(edev->dev, "extcon: maximum number of supported cables exceeded.\n");
+		return -EINVAL;
 	}
 
 	edev->dev = kzalloc(sizeof(struct device), GFP_KERNEL);
@@ -258,6 +540,8 @@ int extcon_dev_register(struct extcon_dev *edev, struct device *dev)
 		put_device(edev->dev);
 		goto err_dev;
 	}
+
+	spin_lock_init(&edev->lock);
 
 	RAW_INIT_NOTIFIER_HEAD(&edev->nh);
 
