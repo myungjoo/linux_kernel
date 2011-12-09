@@ -34,6 +34,8 @@ struct max17042_chip {
 	struct i2c_client *client;
 	struct power_supply battery;
 	struct max17042_platform_data *pdata;
+	struct work_struct work;
+	int    init_complete;
 };
 
 static int max17042_write_reg(struct i2c_client *client, u8 reg, u16 value)
@@ -85,6 +87,9 @@ static int max17042_get_property(struct power_supply *psy,
 {
 	struct max17042_chip *chip = container_of(psy,
 				struct max17042_chip, battery);
+
+	if (!chip->init_complete)
+		return -EAGAIN;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_PRESENT:
@@ -180,6 +185,31 @@ static int max17042_get_property(struct power_supply *psy,
 	return 0;
 }
 
+static void max17042_init_worker(struct work_struct *work)
+{
+	struct max17042_chip *chip = container_of(work,
+				struct max17042_chip, work);
+	struct i2c_client *client = chip->client;
+	int ret;
+
+
+	/* Initialize registers according to values from the platform data */
+	if (chip->pdata->init_data)
+		max17042_set_reg(client, chip->pdata->init_data,
+				 chip->pdata->num_init_data);
+
+	if (!chip->pdata->enable_current_sense) {
+		max17042_write_reg(client, MAX17042_CGAIN, 0x0000);
+		max17042_write_reg(client, MAX17042_MiscCFG, 0x0003);
+		max17042_write_reg(client, MAX17042_LearnCFG, 0x0007);
+	} else {
+		if (chip->pdata->r_sns == 0)
+			chip->pdata->r_sns = MAX17042_DEFAULT_SNS_RESISTOR;
+	}
+
+	chip->init_complete = 1;
+}
+
 static int __devinit max17042_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
@@ -214,24 +244,12 @@ static int __devinit max17042_probe(struct i2c_client *client,
 	if (ret) {
 		dev_err(&client->dev, "failed: power supply register\n");
 		kfree(chip);
-		return ret;
-	}
-
-	/* Initialize registers according to values from the platform data */
-	if (chip->pdata->init_data)
-		max17042_set_reg(client, chip->pdata->init_data,
-				 chip->pdata->num_init_data);
-
-	if (!chip->pdata->enable_current_sense) {
-		max17042_write_reg(client, MAX17042_CGAIN, 0x0000);
-		max17042_write_reg(client, MAX17042_MiscCFG, 0x0003);
-		max17042_write_reg(client, MAX17042_LearnCFG, 0x0007);
 	} else {
-		if (chip->pdata->r_sns == 0)
-			chip->pdata->r_sns = MAX17042_DEFAULT_SNS_RESISTOR;
+		INIT_WORK(&chip->work, max17042_init_worker);
+		schedule_work(&chip->work);
 	}
 
-	return 0;
+	return ret;
 }
 
 static int __devexit max17042_remove(struct i2c_client *client)
