@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/mod_devicetable.h>
 #include <linux/power_supply.h>
 #include <linux/power/max17042_battery.h>
@@ -42,6 +43,11 @@
 #define STATUS_TMX_BIT         (1 << 13)
 #define STATUS_SMX_BIT         (1 << 14)
 #define STATUS_BR_BIT          (1 << 15)
+
+/* Interrupt mask bits */
+#define CONFIG_ALRT_BIT_ENBL	(1 << 2)
+#define STATUS_INTR_SOC_BIT	(1 << 14)
+#define STATUS_INTR_LOW_SOC_BIT	(1 << 10)
 
 #define VFSOC0_LOCK		0x0000
 #define VFSOC0_UNLOCK		0x0080
@@ -528,6 +534,40 @@ static int max17042_init_chip(struct max17042_chip *chip)
 	return 0;
 }
 
+static void max17042_set_soc_threshold(struct max17042_chip *chip, u16 off)
+{
+	u16 soc, soc_tr;
+
+	/* program interrupt thesholds such that we should
+	 * get interrupt for every 'off' perc change in the soc
+	 */
+	soc = max17042_read_reg(chip->client, MAX17042_RepSOC) >> 8;
+	soc_tr = (soc + off) << 8;
+	soc_tr |= (soc - off);
+	max17042_write_reg(chip->client, MAX17042_SALRT_Th, soc_tr);
+}
+
+static irqreturn_t max17042_intr_handler(int id, void *dev)
+{
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t max17042_thread_handler(int id, void *dev)
+{
+	struct max17042_chip *chip = dev;
+	u16 val;
+
+	val = max17042_read_reg(chip->client, MAX17042_STATUS);
+	if ((val & STATUS_INTR_SOC_BIT) ||
+		(val & STATUS_INTR_LOW_SOC_BIT)) {
+		printk(KERN_ERR "SOC threshold INTR\n");
+		dev_info(&chip->client->dev, "SOC threshold INTR\n");
+		max17042_set_soc_threshold(chip, 1);
+	}
+
+	power_supply_changed(&chip->battery);
+	return IRQ_HANDLED;
+}
 
 static void max17042_init_worker(struct work_struct *work)
 {
@@ -535,7 +575,7 @@ static void max17042_init_worker(struct work_struct *work)
 				struct max17042_chip, work);
 	struct i2c_client *client = chip->client;
 	int ret;
-
+	u16 reg;
 
 	/* Initialize registers according to values from the platform data */
 	if (chip->pdata->init_data)
@@ -555,6 +595,21 @@ static void max17042_init_worker(struct work_struct *work)
 	} else {
 		if (chip->pdata->r_sns == 0)
 			chip->pdata->r_sns = MAX17042_DEFAULT_SNS_RESISTOR;
+	}
+
+	if (client->irq) {
+		ret = request_threaded_irq(client->irq, max17042_intr_handler,
+						max17042_thread_handler,
+						0, chip->battery.name, chip);
+		if (!ret) {
+			reg =  max17042_read_reg(client, MAX17042_CONFIG);
+			reg |= CONFIG_ALRT_BIT_ENBL;
+			max17042_write_reg(client, MAX17042_CONFIG, reg);
+			max17042_set_soc_threshold(chip, 1);
+		} else
+			dev_err(&client->dev, "%s(): cannot get IRQ\n",
+				__func__);
+
 	}
 
 	chip->init_complete = 1;
