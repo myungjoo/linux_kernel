@@ -15,6 +15,10 @@ Description:
 		may have both HDMI and Charger attached, or analog audio,
 		video, and USB cables attached simulteneously.
 
+		If there are cables mutually exclusive with each other,
+		such binary relations may be expressed with extcon_dev's
+		mutually_exclusive array.
+
 What:		/sys/class/extcon/.../name
 Date:		December 2011
 Contact:	MyungJoo Ham <myungjoo.ham@samsung.com>
@@ -54,3 +58,18 @@ Description:
 		Method 1 updates the state (0 or 1) of the
 		corresponding cable (either the name or index of the cable).
 		Method 2 updates the whole state of the extcon dev.
+		Inputs of all the methods are required to meet the
+		mutually_exclusive contidions if they exist.
+
+What:		/sys/class/extcon/.../mutually_exclusive
+Date:		December 2011
+Contact:	MyungJoo Ham <myungjoo.ham@samsung.com>
+Description:
+		Shows the relations of mutually exclusiveness. For example,
+		if the mutually_exclusive array of extcon_dev is
+		{0x3, 0x5, 0xC, 0x0}, the, the output is:
+		# cat mutually_exclusive
+		0x3
+		0x5
+		0xC
+		#

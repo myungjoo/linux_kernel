@@ -56,6 +56,39 @@ struct class *extcon_class_for_android;
 static LIST_HEAD(extcon_dev_list);
 static DEFINE_MUTEX(extcon_dev_list_lock);
 
+/**
+ * check_mutually_exclusive - Check if new_state violates mutually_exclusive
+ *			    condition.
+ * @edev:	the extcon device
+ * @new_state:	new cable attach status for @edev
+ *
+ * Returns 0 if nothing violates. Returns the index + 1 for the first
+ * violated condition.
+ */
+static int check_mutually_exclusive(struct extcon_dev *edev, u32 new_state)
+{
+	int i = 0;
+
+	if (!edev->mutually_exclusive)
+		return 0;
+
+	for (i = 0; edev->mutually_exclusive[i]; i++) {
+		int count = 0, j;
+		u32 correspondants = new_state & edev->mutually_exclusive[i];
+		u32 exp = 1;
+
+		for (j = 0; j < 32; j++) {
+			if (exp & correspondants)
+				count++;
+			if (count > 1)
+				return i + 1;
+			exp <<= 1;
+		}
+	}
+
+	return 0;
+}
+
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
@@ -84,7 +117,7 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-void extcon_set_state(struct extcon_dev *edev, u32 state);
+int extcon_set_state(struct extcon_dev *edev, u32 state);
 static ssize_t state_store(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -111,7 +144,7 @@ static ssize_t state_store(struct device *dev, struct device_attribute *attr,
 		if (ret == 0)
 			ret = -EINVAL;
 		else
-			extcon_set_state(edev, state);
+			ret = extcon_set_state(edev, state);
 	} else {
 		ret = -EINVAL;
 	}
@@ -135,6 +168,23 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%s\n", dev_name(edev->dev));
 }
 
+static ssize_t mutually_exclusive_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
+	int i;
+	int count = 0;
+
+	if (!edev->mutually_exclusive || !edev->mutually_exclusive[0])
+		return sprintf(buf, "No cables are mutually exclusive.\n");
+
+	for (i = 0; edev->mutually_exclusive[i]; i++)
+		count += sprintf(buf + count, "0x%x\n",
+				 edev->mutually_exclusive[i]);
+
+	return count;
+}
+
 /**
  * extcon_update_state() - Update the cable attach states of the extcon device
  *			only for the masked bits.
@@ -150,7 +200,7 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
  * Note that the notifier provides which bits are changed in the state
  * variable with the val parameter (second) to the callback.
  */
-void extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
+int extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 {
 	char name_buf[120];
 	char state_buf[120];
@@ -164,6 +214,10 @@ void extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 
 	if (edev->state != ((edev->state & ~mask) | (state & mask))) {
 		u32 old_state = edev->state;
+
+		if (check_mutually_exclusive(edev, (edev->state & ~mask) |
+						   (state & mask)))
+			return -EPERM;
 
 		edev->state &= ~mask;
 		edev->state |= state & mask;
@@ -206,6 +260,8 @@ void extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 		/* No changes */
 		spin_unlock_irqrestore(&edev->lock, flags);
 	}
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(extcon_update_state);
 
@@ -217,9 +273,9 @@ EXPORT_SYMBOL_GPL(extcon_update_state);
  * Note that notifier provides which bits are changed in the state
  * variable with the val parameter (second) to the callback.
  */
-void extcon_set_state(struct extcon_dev *edev, u32 state)
+int extcon_set_state(struct extcon_dev *edev, u32 state)
 {
-	extcon_update_state(edev, 0xffffffff, state);
+	return extcon_update_state(edev, 0xffffffff, state);
 }
 EXPORT_SYMBOL_GPL(extcon_set_state);
 
@@ -293,8 +349,7 @@ int extcon_set_cable_state_(struct extcon_dev *edev,
 		return -EINVAL;
 
 	state = cable_state ? (1 << index) : 0;
-	extcon_update_state(edev, 1 << index, state);
-	return 0;
+	return extcon_update_state(edev, 1 << index, state);
 }
 EXPORT_SYMBOL_GPL(extcon_set_cable_state_);
 
@@ -440,6 +495,7 @@ EXPORT_SYMBOL_GPL(extcon_unregister_notifier);
 static struct device_attribute extcon_attrs[] = {
 	__ATTR(state, S_IRUGO | S_IWUSR, state_show, state_store),
 	__ATTR_RO(name),
+	__ATTR_RO(mutually_exclusive),
 	__ATTR_NULL,
 };
 
