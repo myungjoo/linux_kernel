@@ -323,7 +323,8 @@ acpi_status acpi_hw_legacy_wake(u8 sleep_state)
 	 * and use it to determine whether the system is rebooting or
 	 * resuming. Clear WAK_STS for compatibility.
 	 */
-	acpi_write_bit_register(ACPI_BITREG_WAKE_STATUS, 1);
+	(void)acpi_write_bit_register(ACPI_BITREG_WAKE_STATUS,
+				      ACPI_CLEAR_STATUS);
 	acpi_gbl_system_awake_and_running = TRUE;
 
 	/* Enable power button */
