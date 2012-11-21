@@ -490,9 +490,13 @@ u8 acpi_dm_is_string_buffer(union acpi_parse_object *op);
 u8 acpi_dm_is_pld_buffer(union acpi_parse_object *op);
 
 /*
+ * dmdeferred
+ */
+acpi_status acpi_dm_parse_deferred_ops(union acpi_parse_object *root);
+
+/*
  * dmextern
  */
-
 acpi_status acpi_dm_add_to_external_file_list(char *path_list);
 
 void acpi_dm_clear_external_file_list(void);
@@ -525,7 +529,9 @@ acpi_dm_resource_template(struct acpi_op_walk_info *info,
 			  union acpi_parse_object *op,
 			  u8 *byte_data, u32 byte_count);
 
-acpi_status acpi_dm_is_resource_template(union acpi_parse_object *op);
+acpi_status
+acpi_dm_is_resource_template(struct acpi_walk_state *walk_state,
+			     union acpi_parse_object *op);
 
 void acpi_dm_bit_list(u16 mask);
 
