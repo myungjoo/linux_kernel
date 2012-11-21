@@ -333,7 +333,7 @@ ACPI_EXPORT_SYMBOL(acpi_read_bit_register)
  * FUNCTION:    acpi_write_bit_register
  *
  * PARAMETERS:  register_id     - ID of ACPI Bit Register to access
- *              Value           - Value to write to the register, in bit
+ *              value           - Value to write to the register, in bit
  *                                position zero. The bit is automatically
  *                                shifted to the correct position.
  *

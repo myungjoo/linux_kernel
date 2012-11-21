@@ -56,11 +56,16 @@
 extern u8 acpi_gbl_permanent_mmap;
 
 /*
- * Globals that are publicly available, allowing for
- * run time configuration
+ * Globals that are publically available
  */
+
+/* Runtime configuration of debug print levels */
+
 extern u32 acpi_dbg_level;
 extern u32 acpi_dbg_layer;
+
+/* ACPICA runtime options */
+
 extern u8 acpi_gbl_enable_interpreter_slack;
 extern u8 acpi_gbl_all_methods_serialized;
 extern u8 acpi_gbl_create_osi_method;
@@ -106,7 +111,7 @@ extern u8 acpi_gbl_reduced_hardware;	/* ACPI 5.0 */
 
 extern u32 acpi_rsdt_forced;
 /*
- * Global interfaces
+ * Initialization
  */
 acpi_status
 acpi_initialize_tables(struct acpi_table_desc *initial_storage,
@@ -120,12 +125,14 @@ acpi_status acpi_initialize_objects(u32 flags);
 
 acpi_status acpi_terminate(void);
 
+/*
+ * Miscellaneous global interfaces
+ */
+ACPI_HW_DEPENDENT_RETURN_STATUS(acpi_status acpi_enable(void))
+ ACPI_HW_DEPENDENT_RETURN_STATUS(acpi_status acpi_disable(void))
 #ifdef ACPI_FUTURE_USAGE
 acpi_status acpi_subsystem_status(void);
 #endif
-
-ACPI_HW_DEPENDENT_RETURN_STATUS(acpi_status acpi_enable(void))
-ACPI_HW_DEPENDENT_RETURN_STATUS(acpi_status acpi_disable(void))
 
 #ifdef ACPI_FUTURE_USAGE
 acpi_status acpi_get_system_info(struct acpi_buffer *ret_buffer);
