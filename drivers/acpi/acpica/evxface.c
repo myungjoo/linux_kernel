@@ -626,8 +626,9 @@ acpi_install_gpe_handler(acpi_handle gpe_device,
 	handler->address = address;
 	handler->context = context;
 	handler->method_node = gpe_event_info->dispatch.method_node;
-	handler->original_flags = gpe_event_info->flags &
-			(ACPI_GPE_XRUPT_TYPE_MASK | ACPI_GPE_DISPATCH_MASK);
+	handler->original_flags = (u8)(gpe_event_info->flags &
+				       (ACPI_GPE_XRUPT_TYPE_MASK |
+				        ACPI_GPE_DISPATCH_MASK));
 
 	/*
 	 * If the GPE is associated with a method, it may have been enabled
@@ -746,10 +747,10 @@ acpi_remove_gpe_handler(acpi_handle gpe_device,
 	 * enabled, it should be enabled at this point to restore the
 	 * post-initialization configuration.
 	 */
-
-	if ((handler->original_flags & ACPI_GPE_DISPATCH_METHOD)
-	    && handler->originally_enabled)
+	if ((handler->original_flags & ACPI_GPE_DISPATCH_METHOD) &&
+	    handler->originally_enabled) {
 		(void)acpi_ev_add_gpe_reference(gpe_event_info);
+	}
 
 	/* Now we can free the handler object */
 
