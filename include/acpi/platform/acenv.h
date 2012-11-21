@@ -1,6 +1,6 @@
 /******************************************************************************
  *
- * Name: acenv.h - Generation environment specific items
+ * Name: acenv.h - Host and compiler configuration
  *
  *****************************************************************************/
 
@@ -44,6 +44,12 @@
 #ifndef __ACENV_H__
 #define __ACENV_H__
 
+/*
+ * Environment configuration. The purpose of this file is to interface ACPICA
+ * to the local environment. This includes compiler-specific, OS-specific,
+ * and machine-specific configuration.
+ */
+
 /* Types for ACPI_MUTEX_TYPE */
 
 #define ACPI_BINARY_SEMAPHORE       0
@@ -60,37 +66,66 @@
  *
  *****************************************************************************/
 
-#ifdef ACPI_LIBRARY
-/*
- * Note: The non-debug version of the acpi_library does not contain any
- * debug support, for minimal size. The debug version uses ACPI_FULL_DEBUG
- */
-#define ACPI_USE_LOCAL_CACHE
-#endif
+/* iASL configuration */
 
 #ifdef ACPI_ASL_COMPILER
-#define ACPI_DEBUG_OUTPUT
 #define ACPI_APPLICATION
 #define ACPI_DISASSEMBLER
+#define ACPI_DEBUG_OUTPUT
 #define ACPI_CONSTANT_EVAL_ONLY
 #define ACPI_LARGE_NAMESPACE_NODE
 #define ACPI_DATA_TABLE_DISASSEMBLY
+#define ACPI_SINGLE_THREADED
 #endif
 
+/* acpi_exec configuration. Multithreaded with full AML debugger */
+
 #ifdef ACPI_EXEC_APP
-#undef DEBUGGER_THREADING
-#define DEBUGGER_THREADING      DEBUGGER_SINGLE_THREADED
-#define ACPI_FULL_DEBUG
 #define ACPI_APPLICATION
-#define ACPI_DEBUGGER
+#define ACPI_FULL_DEBUG
 #define ACPI_MUTEX_DEBUG
 #define ACPI_DBG_TRACK_ALLOCATIONS
 #endif
+
+/* acpi_names configuration. Single threaded with debugger output enabled. */
+
+#ifdef ACPI_NAMES_APP
+#define ACPI_DEBUGGER
+#define ACPI_APPLICATION
+#define ACPI_SINGLE_THREADED
+#endif
+
+/*
+ * acpi_bin/acpi_help/acpi_src configuration. All single threaded, with
+ * no debug output.
+ */
+#if (defined ACPI_BIN_APP)   || \
+	(defined ACPI_SRC_APP)   || \
+	(defined ACPI_XTRACT_APP)
+#define ACPI_APPLICATION
+#define ACPI_SINGLE_THREADED
+#endif
+
+#ifdef ACPI_HELP_APP
+#define ACPI_APPLICATION
+#define ACPI_SINGLE_THREADED
+#define ACPI_NO_ERROR_MESSAGES
+#endif
+
+/* Linkable ACPICA library */
+
+#ifdef ACPI_LIBRARY
+#define ACPI_USE_LOCAL_CACHE
+#endif
+
+/* Common for all ACPICA applications */
 
 #ifdef ACPI_APPLICATION
 #define ACPI_USE_SYSTEM_CLIBRARY
 #define ACPI_USE_LOCAL_CACHE
 #endif
+
+/* Common debug support */
 
 #ifdef ACPI_FULL_DEBUG
 #define ACPI_DEBUGGER
@@ -230,9 +265,9 @@
  * We want to keep these to a minimum.
  */
 #ifdef ACPI_USE_STANDARD_HEADERS
-/*
- * Use the standard headers from the standard locations
- */
+
+/* Use the standard headers from the standard locations */
+
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -240,9 +275,8 @@
 
 #endif				/* ACPI_USE_STANDARD_HEADERS */
 
-/*
- * We will be linking to the standard Clib functions
- */
+/* We will be linking to the standard Clib functions */
+
 #define ACPI_STRSTR(s1,s2)      strstr((s1), (s2))
 #define ACPI_STRCHR(s1,c)       strchr((s1), (c))
 #define ACPI_STRLEN(s)          (acpi_size) strlen((s))
@@ -274,13 +308,12 @@
  *
  *****************************************************************************/
 
- /*
-  * Use local definitions of C library macros and functions
-  * NOTE: The function implementations may not be as efficient
-  * as an inline or assembly code implementation provided by a
-  * native C library.
-  */
-
+/*
+ * Use local definitions of C library macros and functions. These function
+ * implementations may not be as efficient as an inline or assembly code
+ * implementation provided by a native C library, but they are functionally
+ * equivalent.
+ */
 #ifndef va_arg
 
 #ifndef _VALIST
@@ -288,21 +321,21 @@
 typedef char *va_list;
 #endif				/* _VALIST */
 
-/*
- * Storage alignment properties
- */
+/* Storage alignment properties */
+
 #define  _AUPBND                (sizeof (acpi_native_int) - 1)
 #define  _ADNBND                (sizeof (acpi_native_int) - 1)
 
-/*
- * Variable argument list macro definitions
- */
+/* Variable argument list macro definitions */
+
 #define _bnd(X, bnd)            (((sizeof (X)) + (bnd)) & (~(bnd)))
 #define va_arg(ap, T)           (*(T *)(((ap) += (_bnd (T, _AUPBND))) - (_bnd (T,_ADNBND))))
 #define va_end(ap)              (void) 0
 #define va_start(ap, A)         (void) ((ap) = (((char *) &(A)) + (_bnd (A,_AUPBND))))
 
 #endif				/* va_arg */
+
+/* Use the local (ACPICA) definitions of the clib functions */
 
 #define ACPI_STRSTR(s1,s2)      acpi_ut_strstr ((s1), (s2))
 #define ACPI_STRCHR(s1,c)       acpi_ut_strchr ((s1), (c))

@@ -147,7 +147,7 @@ acpi_status acpi_tb_initialize_facs(void)
 					 ACPI_CAST_INDIRECT_PTR(struct
 								acpi_table_header,
 								&acpi_gbl_FACS));
-	return status;
+	return (status);
 }
 #endif				/* !ACPI_REDUCED_HARDWARE */
 
@@ -383,10 +383,6 @@ void acpi_tb_check_dsdt_header(void)
 				 "old, new headers below"));
 		acpi_tb_print_table_header(0, &acpi_gbl_original_dsdt_header);
 		acpi_tb_print_table_header(0, acpi_gbl_DSDT);
-
-		ACPI_ERROR((AE_INFO,
-			    "Please send DMI info to linux-acpi@vger.kernel.org\n"
-			    "If system does not work as expected, please boot with acpi=copy_dsdt"));
 
 		/* Disable further error messages */
 
