@@ -46,9 +46,7 @@
 #include "acdispat.h"
 #include "acinterp.h"
 #include "acnamesp.h"
-#ifdef	ACPI_DISASSEMBLER
-#include <acpi/acdisasm.h>
-#endif
+#include "acdisasm.h"
 
 #define _COMPONENT          ACPI_DISPATCHER
 ACPI_MODULE_NAME("dsmethod")
