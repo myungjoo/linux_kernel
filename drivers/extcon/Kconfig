@@ -1,5 +1,5 @@
 menuconfig EXTCON
-	tristate "External Connector Class (extcon) support"
+	bool "External Connector Class (extcon) support"
 	help
 	  Say Y here to enable external connector class (extcon) support.
 	  This allows monitoring external connectors by userspace
