@@ -491,7 +491,7 @@ EXPORT_SYMBOL_GPL(extcon_register_interest);
  */
 int extcon_unregister_interest(struct extcon_specific_cable_nb *obj)
 {
-	if (!obj)
+	if (!obj || !obj->edev)
 		return -EINVAL;
 
 	return raw_notifier_chain_unregister(&obj->edev->nh, &obj->internal_nb);
